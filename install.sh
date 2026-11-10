@@ -680,19 +680,20 @@ EOF
 
 open_combined_menu() (
   local menu_dir
+  # The packaged toolbox supports overriding its kernel version and checksum.
+  # Its public bootstrap currently runs only on Linux amd64.
+  if [[ -z ${SING_BOX_VERSION:-} && -z ${SING_BOX_SHA256:-} ]]; then
+    export SING_BOX_VERSION=1.14.4
+    export SING_BOX_SHA256=699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968
+  fi
   umask 077
   menu_dir=$(mktemp -d)
   trap 'unlink "$menu_dir/menu.sh" 2>/dev/null || true; rmdir "$menu_dir"' EXIT
   {
     printf '%s\n' 'if [[ ${BASH_SOURCE[0]} == "$0" ]]; then' '  set -Eeuo pipefail'
-    declare -f red require_root curl_download install_pinned_sing_box run_fixed_argo
+    declare -f run_fixed_argo
     cat <<'MENU_ACTIONS'
-    AUTH_HEADER_FILE=
-    RELEASE_VERSION=${VXR_RELEASE_VERSION:-latest}
-    case "$1" in
-      19) install_pinned_sing_box ;;
-      20) run_fixed_argo ;;
-    esac
+    run_fixed_argo
     exit
   fi
 
@@ -704,7 +705,7 @@ open_combined_menu() (
       local original_menu
       original_menu=$(command cat)
       if [[ $original_menu == *$'\n18) '*$'\n0) 退出\n'* ]]; then
-        local extra=$'19) 安装或升级 sing-box 1.14.4\n20) 安装固定 Argo 隧道（VLESS + WebSocket + TLS）\n'
+        local extra=$'20) 安装固定 Argo 隧道（VLESS + WebSocket + TLS）\n'
         KYONG_COMBINED_MENU=${original_menu/$'\n0) 退出'/$'\n'${extra}'0) 退出'}
         printf '%s\n' "$KYONG_COMBINED_MENU"
       else
@@ -724,8 +725,8 @@ open_combined_menu() (
     fi
     while builtin read -r -p '请选择 [0-20]: ' choice; do
       case "$choice" in
-        19|20)
-          if ! bash "$KYONG_MENU_ACTIONS" "$choice"; then
+          20)
+            if ! bash "$KYONG_MENU_ACTIONS"; then
             printf '操作失败，请查看上面的错误信息。\n' >&2
           fi
           pause

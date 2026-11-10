@@ -678,6 +678,72 @@ EOF
   cat "$config_dir/client-uri.txt"
 )
 
+open_combined_menu() (
+  local menu_dir
+  umask 077
+  menu_dir=$(mktemp -d)
+  trap 'unlink "$menu_dir/menu.sh" 2>/dev/null || true; rmdir "$menu_dir"' EXIT
+  {
+    printf '%s\n' 'if [[ ${BASH_SOURCE[0]} == "$0" ]]; then' '  set -Eeuo pipefail'
+    declare -f red require_root curl_download install_pinned_sing_box run_fixed_argo
+    cat <<'MENU_ACTIONS'
+    AUTH_HEADER_FILE=
+    RELEASE_VERSION=${VXR_RELEASE_VERSION:-latest}
+    case "$1" in
+      19) install_pinned_sing_box ;;
+      20) run_fixed_argo ;;
+    esac
+    exit
+  fi
+
+  # Apply the extension only to the original main menu of the packaged Bash script.
+  KYONG_MENU_ACTIONS=${BASH_SOURCE[0]}
+  unset BASH_ENV
+  cat() {
+    if [[ ${FUNCNAME[1]:-} == menu && $# == 0 ]]; then
+      local original_menu
+      original_menu=$(command cat)
+      if [[ $original_menu == *$'\n18) '*$'\n0) 退出\n'* ]]; then
+        local extra=$'19) 安装或升级 sing-box 1.14.4\n20) 安装固定 Argo 隧道（VLESS + WebSocket + TLS）\n'
+        KYONG_COMBINED_MENU=${original_menu/$'\n0) 退出'/$'\n'${extra}'0) 退出'}
+        printf '%s\n' "$KYONG_COMBINED_MENU"
+      else
+        KYONG_COMBINED_MENU=
+        printf '%s\n' "$original_menu"
+      fi
+    else
+      command cat "$@"
+    fi
+  }
+
+  read() {
+    if [[ ${FUNCNAME[1]:-} != menu || $# != 4 || $1 != -r || $2 != -p ||
+          $3 != '请选择 [0-18]: ' || $4 != choice || -z ${KYONG_COMBINED_MENU:-} ]]; then
+      builtin read "$@"
+      return
+    fi
+    while builtin read -r -p '请选择 [0-20]: ' choice; do
+      case "$choice" in
+        19|20)
+          if ! bash "$KYONG_MENU_ACTIONS" "$choice"; then
+            printf '操作失败，请查看上面的错误信息。\n' >&2
+          fi
+          pause
+          clear || true
+          printf '%s\n' "$KYONG_COMBINED_MENU"
+          ;;
+        *) return 0 ;;
+      esac
+    done
+    return 1
+  }
+MENU_ACTIONS
+  } > "$menu_dir/menu.sh"
+  env -u GITHUB_TOKEN -u GH_TOKEN -u TOKEN BASH_ENV="$menu_dir/menu.sh" \
+    RELEASE_REPO="$RELEASE_REPO" VXR_RELEASE_VERSION="$RELEASE_VERSION" \
+    "${INSTALL_DIR}/${APP_NAME}" menu
+)
+
 main() {
   require_root
   if [[ ${1:-} == --fixed-argo ]]; then
@@ -688,19 +754,6 @@ main() {
   if [[ ${1:-} == --sing-box ]]; then
     install_pinned_sing_box
     return
-  fi
-  if [[ $# == 0 && -t 0 ]]; then
-    local install_choice
-    printf '%s\n' '1) VLESS + XHTTP + REALITY 原有安装菜单' \
-      '2) 安装或升级 sing-box 1.14.4' \
-      '3) 安装固定 Argo 隧道（VLESS + WebSocket + TLS）'
-    read -rp '请选择 [1]：' install_choice
-    case "${install_choice:-1}" in
-      1) ;;
-      2) install_pinned_sing_box; return ;;
-      3) run_fixed_argo; return ;;
-      *) red '无效选项。'; return 2 ;;
-    esac
   fi
   validate_release_inputs
 
@@ -879,7 +932,7 @@ main() {
   unset GITHUB_TOKEN GH_TOKEN TOKEN
   green "安装完成：${INSTALL_DIR}/${APP_NAME}"
   echo
-  env -u GITHUB_TOKEN -u GH_TOKEN -u TOKEN RELEASE_REPO="$RELEASE_REPO" VXR_RELEASE_VERSION="$RELEASE_VERSION" "${INSTALL_DIR}/${APP_NAME}" menu
+  open_combined_menu
 }
 
 main "$@"

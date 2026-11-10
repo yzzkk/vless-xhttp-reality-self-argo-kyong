@@ -414,8 +414,97 @@ rollback_version_change() {
   (( failed == 0 ))
 }
 
+install_pinned_sing_box() (
+  require_root
+  if [[ $(uname -s) != Linux || ! -d /run/systemd/system ]]; then
+    red '此入口需要使用 systemd 的 Linux VPS。'
+    exit 1
+  fi
+
+  local stage arch digest package reported
+  local upstream_rev=0f7e95f9ec066182f6df3459d1feb2a7ced567a9
+  local upstream_digest=2c34ee78d5fa1f38d843c2739f453a5daaa058da23a80493c2e708e728128059
+  local upgrade_rev=d771e3f7d7468331b39fa3e7dd99692d0e96c694
+  local upgrade_digest=6cc05a44bf8d3eb8c09adb53c695f9126431922cbcff3745d6ca68f1bde28ab6
+  local version=1.14.4
+
+  umask 077
+  stage=$(mktemp -d)
+  trap 'rm -rf -- "$stage"' EXIT
+  if [[ -e /etc/sing-box/sing-box || -L /etc/sing-box/sing-box ]]; then
+    curl_download "https://raw.githubusercontent.com/yzzkk/vless-xhttp-reality-self-argo-kyong/$upgrade_rev/upgrade-sing-box-1.14.4.sh" "$stage/upgrade.sh"
+    printf '%s  %s\n' "$upgrade_digest" "$stage/upgrade.sh" | sha256sum -c -
+    env -u GITHUB_TOKEN -u GH_TOKEN -u TOKEN bash "$stage/upgrade.sh"
+    exit
+  fi
+
+  case "$(uname -m)" in
+    x86_64) arch=amd64; digest=699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968 ;;
+    aarch64) arch=arm64; digest=436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26 ;;
+    *) red '此 sing-box 安装入口支持 Linux amd64 和 arm64。'; exit 1 ;;
+  esac
+  package="sing-box-$version-linux-$arch"
+  curl_download "https://github.com/SagerNet/sing-box/releases/download/v$version/$package.tar.gz" "$stage/kernel.tar.gz"
+  printf '%s  %s\n' "$digest" "$stage/kernel.tar.gz" | sha256sum -c -
+  tar -xOf "$stage/kernel.tar.gz" "$package/sing-box" > "$stage/sing-box"
+  tar -xOf "$stage/kernel.tar.gz" "$package/libcronet.so" > "$stage/libcronet.so"
+  chmod 0755 "$stage/sing-box"
+  reported=$("$stage/sing-box" version)
+  if [[ ${reported%%$'\n'*} != "sing-box version $version" ]]; then
+    red '下载的内核未报告目标版本。'
+    exit 1
+  fi
+
+  curl_download "https://raw.githubusercontent.com/fscarmen/sing-box/$upstream_rev/sing-box.sh" "$stage/upstream.sh"
+  printf '%s  %s\n' "$upstream_digest" "$stage/upstream.sh" | sha256sum -c -
+  # Use the verified package for the initial install, including its sibling library.
+  awk '
+    /^get_sing_box_version\(\) \{$/ {
+      print "get_sing_box_version() { echo 1.14.4; }"
+      in_version = 1
+      version_count++
+      next
+    }
+    in_version { if ($0 == "}") in_version = 0; next }
+    /^      local ONLINE=\$\(get_sing_box_version\)$/ {
+      print "      cp \"$KYONG_KERNEL_DIR/sing-box\" \"$KYONG_KERNEL_DIR/libcronet.so\" \"$TEMP_DIR/\""
+      in_download = 1
+      download_count++
+      next
+    }
+    in_download {
+      if ($0 == "    } &") { in_download = 0; print }
+      next
+    }
+    $0 == "  cp $TEMP_DIR/sing-box $TEMP_DIR/jq ${WORK_DIR}" {
+      print "  cp \"$TEMP_DIR/libcronet.so\" \"${WORK_DIR}/\" || exit 1"
+      copy_count++
+    }
+    { print }
+    END {
+      if (in_version || in_download || version_count != 1 || download_count != 1 || copy_count != 1) exit 1
+    }
+  ' "$stage/upstream.sh" > "$stage/install.sh"
+  bash -n "$stage/install.sh"
+  env -u GITHUB_TOKEN -u GH_TOKEN -u TOKEN KYONG_KERNEL_DIR="$stage" bash "$stage/install.sh"
+)
+
 main() {
   require_root
+  if [[ ${1:-} == --sing-box ]]; then
+    install_pinned_sing_box
+    return
+  fi
+  if [[ $# == 0 && -t 0 ]]; then
+    local install_choice
+    printf '%s\n' '1) VLESS + XHTTP + REALITY 原有安装菜单' '2) 安装或升级 sing-box 1.14.4'
+    read -rp '请选择 [1]：' install_choice
+    case "${install_choice:-1}" in
+      1) ;;
+      2) install_pinned_sing_box; return ;;
+      *) red '无效选项。'; return 2 ;;
+    esac
+  fi
   validate_release_inputs
 
   local arch asset tmp archive checksum_url checksum_file expected actual requested_version

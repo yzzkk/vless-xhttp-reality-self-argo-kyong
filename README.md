@@ -10,15 +10,14 @@ Current public assets support Linux `amd64` only. `arm64` and `armv7` hosts are 
 bash <(curl -fsSL https://raw.githubusercontent.com/yzzkk/vless-xhttp-reality-self-argo-kyong/main/install.sh)
 ```
 
-Run the command as root on the VPS. The first menu offers:
+Run the command as root on the VPS. The installer opens the original menu with two additional options:
 
-1. VLESS + XHTTP + REALITY installation menu.
-2. Install or upgrade sing-box to 1.14.4.
-3. Install fixed Cloudflare Argo Tunnel with VLESS + WebSocket + TLS.
+- **19** Install or upgrade sing-box to 1.14.4.
+- **20** Install fixed Cloudflare Argo Tunnel with VLESS + WebSocket + TLS.
 
-For option 3, install Xray and a version of cloudflared that supports `--token-file`. In Cloudflare, route your fixed hostname to `http://127.0.0.1:18080` (or the port you choose). Enter the named tunnel token on the VPS, then import the resulting `vless://` link into your client.
+For option 20, install Xray and a version of cloudflared that supports `--token-file`. In Cloudflare, route your fixed hostname to `http://127.0.0.1:18080` (or the port you choose). Enter the named tunnel token on the VPS, then import the resulting `vless://` link into your client.
 
-Option 1 installs the current mutable assets from the upstream public repository's `main/dist` path. The archive still carries an internal VERSION and a required SHA256 sidecar, but `latest` is not a pinned release tag.
+The bootstrap installs the current mutable assets from the upstream public repository's `main/dist` path. The archive still carries an internal VERSION and a required SHA256 sidecar, but `latest` is not a pinned release tag.
 
 Optionally use a separate repository that publishes GitHub Release assets:
 
@@ -37,6 +36,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yzzkk/vless-xhttp-reality-se
 
 The implementation is shipped as executable assets. The main installer and egress-pool entrypoints still contain reversible packaged script payloads, so these assets prevent accidental source-tree publication but are not a cryptographic source-confidentiality boundary. Do not publish private source, generated state, subscriptions, certificates, or keys in this repository.
 
-In the original menu opened by option 1, item 2 launches the upstream GPLv3 `fscarmen/sing-box` installer directly. Its downloads, protocols, service units, certificate handling, and rollback behavior are controlled by that upstream project rather than this bootstrap.
+Menu item 2 launches the upstream GPLv3 `fscarmen/sing-box` installer directly. Its downloads, protocols, service units, certificate handling, and rollback behavior are controlled by that upstream project rather than this bootstrap.
 
 The bootstrap accepts HTTPS downloads only, requires a valid SHA256 sidecar, rejects unexpected archive members, and installs each version under `/usr/local/lib/vless-xhttp-reality-self/` before atomically updating `/usr/local/bin` links. A failed checksum or malformed archive is never installed.

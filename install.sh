@@ -2,11 +2,17 @@
 set -Eeuo pipefail
 
 APP_NAME="vless-xhttp-reality-self"
-PUBLIC_REPO="${PUBLIC_REPO:-tao-t356/vless-xhttp-reality-self}"
-RELEASE_REPO="${RELEASE_REPO:-tao-t356/vless-xhttp-reality-self}"
+DEFAULT_PUBLIC_REPO=yzzkk/vless-xhttp-reality-self-argo-kyong
+DEFAULT_ASSET_REF=18a516dd3ec0469513174e677401b3f4fdd56c02
+PUBLIC_REPO="${PUBLIC_REPO:-$DEFAULT_PUBLIC_REPO}"
+RELEASE_REPO="${RELEASE_REPO:-$PUBLIC_REPO}"
 RELEASE_VERSION="${RELEASE_VERSION:-${VERSION:-latest}}"
 ASSET_BASE_WAS_SET="${ASSET_BASE+x}"
-ASSET_BASE="${ASSET_BASE:-https://raw.githubusercontent.com/${PUBLIC_REPO}/main/dist}"
+if [[ $PUBLIC_REPO == "$DEFAULT_PUBLIC_REPO" ]]; then
+  ASSET_BASE="${ASSET_BASE:-https://raw.githubusercontent.com/${PUBLIC_REPO}/${DEFAULT_ASSET_REF}/dist}"
+else
+  ASSET_BASE="${ASSET_BASE:-https://raw.githubusercontent.com/${PUBLIC_REPO}/main/dist}"
+fi
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 INSTALL_ROOT="${INSTALL_ROOT:-/usr/local/lib/${APP_NAME}}"
 LOCK_FILE="${LOCK_FILE:-/run/lock/${APP_NAME}-bootstrap.lock}"
@@ -105,7 +111,7 @@ validate_release_inputs() {
     exit 1
   fi
   if [[ "$RELEASE_VERSION" != "latest" && "$RELEASE_REPO" == "$PUBLIC_REPO" ]]; then
-    red "默认公开仓库只从 main/dist 发布资产，不创建 GitHub Release。"
+    red "默认公开仓库从固定提交发布资产，不创建 GitHub Release。"
     red "固定版本安装必须显式指定另一个实际发布 Release 资产的 RELEASE_REPO。"
     exit 1
   fi
@@ -135,7 +141,7 @@ curl_download() {
       effective_url="${effective_url}?vxrs_cache=${cache_buster}"
     fi
   fi
-  curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  curl -q -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
     --connect-timeout 15 --retry 3 --retry-delay 2 --max-filesize 268435456 \
     "${headers[@]}" "$effective_url" -o "$output" || return $?
 }
@@ -421,20 +427,46 @@ install_pinned_sing_box() (
     exit 1
   fi
 
-  local stage arch digest package reported
+  local stage arch digest package reported tool
   local upstream_rev=0f7e95f9ec066182f6df3459d1feb2a7ced567a9
   local upstream_digest=2c34ee78d5fa1f38d843c2739f453a5daaa058da23a80493c2e708e728128059
   local upgrade_rev=d771e3f7d7468331b39fa3e7dd99692d0e96c694
   local upgrade_digest=6cc05a44bf8d3eb8c09adb53c695f9126431922cbcff3745d6ca68f1bde28ab6
   local version=1.14.4
+  local patch_digest=f14866d1940c293ffd0ce9e07328e9508211ee8dbbc2eeb5a599e5599efa463f
+
+  exec 9>/run/lock/kyong-sing-box-setup.lock
+  flock -n 9 || { red '已有 sing-box 安装或升级正在运行。'; exit 1; }
+
+  local missing=()
+  for tool in jq qrencode patch; do
+    command -v "$tool" >/dev/null || missing+=("$tool")
+  done
+  if (( ${#missing[@]} )); then
+    if ! command -v apt-get >/dev/null; then
+      red "请先通过系统软件包管理器安装：${missing[*]}"
+      exit 1
+    fi
+    apt-get update
+    apt-get install -y -- "${missing[@]}"
+  fi
 
   umask 077
   stage=$(mktemp -d)
   trap 'rm -rf -- "$stage"' EXIT
+  curl_download "https://raw.githubusercontent.com/fscarmen/sing-box/$upstream_rev/sing-box.sh" "$stage/upstream.sh"
+  printf '%s  %s\n' "$upstream_digest" "$stage/upstream.sh" | sha256sum -c -
+  curl_download "https://raw.githubusercontent.com/yzzkk/vless-xhttp-reality-self-argo-kyong/main/sing-box-1.14.4-hardening.patch" "$stage/hardening.patch"
+  printf '%s  %s\n' "$patch_digest" "$stage/hardening.patch" | sha256sum -c -
+  sed 's/ --no-check-certificate//g' "$stage/upstream.sh" > "$stage/install.sh"
+  patch --batch --forward --fuzz=0 "$stage/install.sh" "$stage/hardening.patch"
+  bash -n "$stage/install.sh"
+
   if [[ -e /etc/sing-box/sing-box || -L /etc/sing-box/sing-box ]]; then
     curl_download "https://raw.githubusercontent.com/yzzkk/vless-xhttp-reality-self-argo-kyong/$upgrade_rev/upgrade-sing-box-1.14.4.sh" "$stage/upgrade.sh"
     printf '%s  %s\n' "$upgrade_digest" "$stage/upgrade.sh" | sha256sum -c -
-    env -u GITHUB_TOKEN -u GH_TOKEN -u TOKEN bash "$stage/upgrade.sh"
+    env -u GITHUB_TOKEN -u GH_TOKEN -u TOKEN bash "$stage/upgrade.sh" 9>&-
+    env -u GITHUB_TOKEN -u GH_TOKEN -u TOKEN bash "$stage/install.sh" --kyong-install-shortcut
     exit
   fi
 
@@ -455,38 +487,7 @@ install_pinned_sing_box() (
     exit 1
   fi
 
-  curl_download "https://raw.githubusercontent.com/fscarmen/sing-box/$upstream_rev/sing-box.sh" "$stage/upstream.sh"
-  printf '%s  %s\n' "$upstream_digest" "$stage/upstream.sh" | sha256sum -c -
-  # Use the verified package for the initial install, including its sibling library.
-  awk '
-    /^get_sing_box_version\(\) \{$/ {
-      print "get_sing_box_version() { echo 1.14.4; }"
-      in_version = 1
-      version_count++
-      next
-    }
-    in_version { if ($0 == "}") in_version = 0; next }
-    /^      local ONLINE=\$\(get_sing_box_version\)$/ {
-      print "      cp \"$KYONG_KERNEL_DIR/sing-box\" \"$KYONG_KERNEL_DIR/libcronet.so\" \"$TEMP_DIR/\""
-      in_download = 1
-      download_count++
-      next
-    }
-    in_download {
-      if ($0 == "    } &") { in_download = 0; print }
-      next
-    }
-    $0 == "  cp $TEMP_DIR/sing-box $TEMP_DIR/jq ${WORK_DIR}" {
-      print "  cp \"$TEMP_DIR/libcronet.so\" \"${WORK_DIR}/\" || exit 1"
-      copy_count++
-    }
-    { print }
-    END {
-      if (in_version || in_download || version_count != 1 || download_count != 1 || copy_count != 1) exit 1
-    }
-  ' "$stage/upstream.sh" > "$stage/install.sh"
-  bash -n "$stage/install.sh"
-  env -u GITHUB_TOKEN -u GH_TOKEN -u TOKEN KYONG_KERNEL_DIR="$stage" bash "$stage/install.sh"
+  env -u GITHUB_TOKEN -u GH_TOKEN -u TOKEN KYONG_KERNEL_DIR="$stage" bash "$stage/install.sh" 9>&-
 )
 
 run_fixed_argo() (
@@ -497,17 +498,41 @@ run_fixed_argo() (
   tunnel_unit=hy2plus-argo-cloudflared.service
   unit_dir=/etc/systemd/system
 
+  check_public_websocket() {
+    local host="$1" path="$2" status
+    status=$(curl -q -s --http1.1 --max-time 5 -o /dev/null -w '%{http_code}' \
+      -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+      -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+      "https://$host$path" || true)
+    if [[ $status != 101 ]]; then
+      printf '公网 WebSocket 握手返回 %s。请核对 Cloudflare 路由后运行 --fixed-argo check。\n' "${status:-未知}" >&2
+      return 1
+    fi
+    printf '公网 WebSocket 握手通过。\n'
+  }
+
   if [[ $(uname -s) != Linux || $EUID != 0 ]]; then
     printf '请在使用 systemd 的 Linux VPS 上以 root 运行。\n' >&2
     exit 1
   fi
 
-  if [[ ${1:-} == show ]]; then
-    cat "$config_dir/client-uri.txt"
+  if [[ ${1:-} == show || ${1:-} == check ]]; then
+    if (( $# != 1 )) || ! IFS= read -r uri < "$config_dir/client-uri.txt"; then
+      printf '无法读取已保存的 Argo 节点。\n' >&2
+      exit 1
+    fi
+    if [[ ! $uri =~ ^vless://[0-9a-fA-F-]+@([a-zA-Z0-9.-]+):443\?.*\&path=%2F([0-9a-f]{32})\#Fixed-Argo$ ]]; then
+      printf '已保存的 Argo 节点格式无效。\n' >&2
+      exit 1
+    fi
+    check_public_websocket "${BASH_REMATCH[1]}" "/${BASH_REMATCH[2]}" || exit 1
+    if [[ $1 == show ]]; then
+      printf '%s\n' "$uri"
+    fi
     exit
   fi
   if (( $# != 0 )); then
-    printf '用法：bash install.sh --fixed-argo [show]\n' >&2
+    printf '用法：bash install.sh --fixed-argo [check|show]\n' >&2
     exit 2
   fi
 
@@ -537,7 +562,7 @@ run_fixed_argo() (
   fi
   for path in "$config_dir" "$unit_dir/$origin_unit" "$unit_dir/$tunnel_unit"; do
     if [[ -e $path || -L $path ]]; then
-      printf '已有安装文件 %s。可以用 show 查看已生成的链接。\n' "$path" >&2
+      printf '已有安装文件 %s。可以用 --fixed-argo show 验证并查看已生成的链接。\n' "$path" >&2
       exit 1
     fi
   done
@@ -665,15 +690,7 @@ EOF
   systemctl is-active --quiet "$tunnel_unit"
   applying=0
 
-  status=$(curl -q -s --http1.1 --max-time 5 -o /dev/null -w '%{http_code}' \
-    -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
-    -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-    "https://$hostname$ws_path" || true)
-  if [[ $status == 101 ]]; then
-    printf '公网 WebSocket 握手通过。\n'
-  else
-    printf '隧道服务已启动。公网握手返回 %s，请核对 Cloudflare 路由后再测试。\n' "${status:-未知}" >&2
-  fi
+  check_public_websocket "$hostname" "$ws_path" || exit 1
   printf '导入 SMBox 的节点链接：\n'
   cat "$config_dir/client-uri.txt"
 )
@@ -691,9 +708,14 @@ open_combined_menu() (
   trap 'unlink "$menu_dir/menu.sh" 2>/dev/null || true; rmdir "$menu_dir"' EXIT
   {
     printf '%s\n' 'if [[ ${BASH_SOURCE[0]} == "$0" ]]; then' '  set -Eeuo pipefail'
-    declare -f run_fixed_argo
+    printf '%s\n' 'AUTH_HEADER_FILE=' 'RELEASE_VERSION=latest'
+    declare -f red require_root curl_download install_pinned_sing_box run_fixed_argo
     cat <<'MENU_ACTIONS'
-    run_fixed_argo
+    case "${1:-}" in
+      --sing-box) install_pinned_sing_box ;;
+      --fixed-argo) run_fixed_argo ;;
+      *) exit 2 ;;
+    esac
     exit
   fi
 
@@ -704,8 +726,11 @@ open_combined_menu() (
     if [[ ${FUNCNAME[1]:-} == menu && $# == 0 ]]; then
       local original_menu
       original_menu=$(command cat)
-      if [[ $original_menu == *$'\n18) '*$'\n0) 退出\n'* ]]; then
+      if [[ "$original_menu"$'\n' == *$'\n18) '*$'\n0) 退出\n'* ]]; then
         local extra=$'20) 安装固定 Argo 隧道（VLESS + WebSocket + TLS）\n'
+        if [[ $original_menu != *$'\n19) '* ]]; then
+          extra=$'19) 安装或升级 sing-box 1.14.4\n'"$extra"
+        fi
         KYONG_COMBINED_MENU=${original_menu/$'\n0) 退出'/$'\n'${extra}'0) 退出'}
         printf '%s\n' "$KYONG_COMBINED_MENU"
       else
@@ -719,15 +744,20 @@ open_combined_menu() (
 
   read() {
     if [[ ${FUNCNAME[1]:-} != menu || $# != 4 || $1 != -r || $2 != -p ||
-          $3 != '请选择 [0-18]: ' || $4 != choice || -z ${KYONG_COMBINED_MENU:-} ]]; then
+          ( $3 != '请选择 [0-18]: ' && $3 != '请选择 [0-19]: ' ) ||
+          $4 != choice || -z ${KYONG_COMBINED_MENU:-} ]]; then
       builtin read "$@"
       return
     fi
     while builtin read -r -p '请选择 [0-20]: ' choice; do
       case "$choice" in
-          20)
-            if ! bash "$KYONG_MENU_ACTIONS"; then
-            printf '操作失败，请查看上面的错误信息。\n' >&2
+        2|19|20)
+          local action=--sing-box
+          if [[ $choice == 20 ]]; then
+            action=--fixed-argo
+          fi
+          if ! bash "$KYONG_MENU_ACTIONS" "$action"; then
+            printf '操作未完成，请查看上面的信息。\n' >&2
           fi
           pause
           clear || true
@@ -931,6 +961,7 @@ main() {
   BOOTSTRAP_TMP=""
   trap - EXIT INT TERM HUP
   unset GITHUB_TOKEN GH_TOKEN TOKEN
+  exec 198>&-
   green "安装完成：${INSTALL_DIR}/${APP_NAME}"
   echo
   open_combined_menu

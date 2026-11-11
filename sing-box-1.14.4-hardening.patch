@@ -1,0 +1,422 @@
+--- upstream.sh
++++ upstream.sh
+@@ -8,5 +8,5 @@
+ 
+ # 各变量默认值
+-TEMP_DIR='/tmp/sing-box'
++TEMP_DIR=$(mktemp -d) || exit 1
+ WORK_DIR='/etc/sing-box'
+ FIREWALL_STATE_DIR="${WORK_DIR}/firewall"
+@@ -37,5 +37,60 @@
+ trap 'cleanup_temp; printf "\n"; exit 1' INT QUIT TERM
+ 
+-mkdir -p "$TEMP_DIR"
++install_kyong_shortcut() {
++  local menu="$WORK_DIR/kyong-menu.sh" pending
++  if [[ ! $0 -ef $menu ]]; then
++    pending=$(mktemp "$WORK_DIR/.kyong-menu.XXXXXXXX") || return 1
++    if ! install -m 0700 "$0" "$pending" || ! mv -fT -- "$pending" "$menu"; then
++      rm -f -- "$pending"
++      return 1
++    fi
++  fi
++  ln -sfnT "$menu" /usr/bin/sb
++}
++
++if [[ ${1:-} == --kyong-install-shortcut ]]; then
++  install_kyong_shortcut
++  exit $?
++fi
++
++kyong_cloudflared() (
++  set -o pipefail
++  local dest=$1 version=2026.10.7 arch digest
++  case $(uname -m) in
++    x86_64) arch=amd64; digest=1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872 ;;
++    aarch64) arch=arm64; digest=3df43aedc9ff291d1735b5cb576cb97e0b157488796db2e32b28aecabb445775 ;;
++    *) return 1 ;;
++  esac
++  curl -q -fsSL --retry 3 --proto '=https' --proto-redir '=https' \
++    "https://github.com/cloudflare/cloudflared/releases/download/$version/cloudflared-linux-$arch" -o "$dest" &&
++    printf '%s  %s\n' "$digest" "$dest" | sha256sum -c - &&
++    chmod 0755 "$dest" || { rm -f -- "$dest"; return 1; }
++)
++
++kyong_warp_register() (
++  set -o pipefail
++  local script
++  script=$(mktemp "$TEMP_DIR/warp.XXXXXXXX") || exit 1
++  trap 'rm -f -- "$script"' EXIT
++  curl -q -fsSL --max-time 15 --proto '=https' --proto-redir '=https' \
++    'https://gitlab.com/fscarmen/warp/-/raw/8372a6a7f51a0f359b693f37ca8abcda54f29f09/api.sh' -o "$script" &&
++    printf '%s  %s\n' '5d70c0d7a239b1e1deb1a0b7369f66f19237180f32b4ee7036ddf5754970e48c' "$script" |
++      sha256sum -c - >&2 &&
++    timeout 15 bash "$script" --register
++)
++
++kyong_reality_public() (
++  set -o pipefail
++  local key=$1 public
++  [[ $key =~ ^[A-Za-z0-9_-]{43}$ ]] || exit 1
++  public=$(
++    { printf '\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x6e\x04\x22\x04\x20'
++      printf '%s=' "$key" | tr '_-' '/+' | base64 -d; } |
++      openssl pkey -inform DER -pubout -outform DER |
++      tail -c 32 | base64 -w0 | tr '+/' '-_' | tr -d '='
++  ) || exit 1
++  [[ $public =~ ^[A-Za-z0-9_-]{43}$ ]] || exit 1
++  printf '%s\n' "$public"
++)
+ 
+ E[0]="Language:\n 1. English (default) \n 2. 简体中文"
+@@ -1143,8 +1198,4 @@
+       fi
+       check_arch
+-      [ ! -e "${WORK_DIR}/qrencode" ] && \
+-        wget --continue --tries=2 --timeout=10 -qO ${WORK_DIR}/qrencode \
+-          ${GH_PROXY}https://github.com/fscarmen/client_template/raw/main/qrencode-go/qrencode-go-linux-$QRENCODE_ARCH 2>/dev/null \
+-          && chmod +x ${WORK_DIR}/qrencode
+       fetch_nodes_value
+       [ -z "$PORT_NGINX" ] && input_nginx_port
+@@ -1481,14 +1532,5 @@
+ }
+ 
+-# jq 入口，优先使用脚本自带 jq
+-jq_exec() {
+-  if [ -x "${WORK_DIR}/jq" ]; then
+-    "${WORK_DIR}/jq" "$@"
+-  elif [ -x "${TEMP_DIR}/jq" ]; then
+-    "${TEMP_DIR}/jq" "$@"
+-  else
+-    jq "$@"
+-  fi
+-}
++jq_exec() { jq "$@"; }
+ 
+ # 更新 Hysteria2 服务端 Realm 模块
+@@ -1915,5 +1957,5 @@
+ warp_account_register() {
+   local WARP_ACCOUNT="$1"
+-  [ -n "$WARP_ACCOUNT" ] || WARP_ACCOUNT=$(timeout 15 bash <(wget -qO- --timeout=5 --tries=1 "https://gitlab.com/fscarmen/warp/-/raw/main/api.sh") --register)
++  [ -n "$WARP_ACCOUNT" ] || WARP_ACCOUNT=$(kyong_warp_register)
+ 
+   grep -q '"id"' <<< "$WARP_ACCOUNT" || return 1
+@@ -2301,25 +2343,9 @@
+     # 任务 1: 下载 sing-box
+     {
+-      local ONLINE=$(get_sing_box_version)
+-      local SB_DIR="$TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH"
+-      local SB_BIN="$SB_DIR/sing-box"
+-      wget --continue --tries=2 --timeout=10 \
+-        ${GH_PROXY}https://github.com/SagerNet/sing-box/releases/download/v$ONLINE/sing-box-$ONLINE-linux-$SING_BOX_ARCH.tar.gz \
+-        -qO- | tar xz -C $TEMP_DIR 2>/dev/null
+-      [ -s "$SB_BIN" ] && [ -x "$SB_BIN" ] && mv "$SB_BIN" "$TEMP_DIR/sing-box" && chmod +x "$TEMP_DIR/sing-box"
+-    } &
+-
+-    # 任务 2: 下载 jq
+-    {
+-      wget --continue --tries=2 --timeout=10 -qO $TEMP_DIR/jq \
+-        ${GH_PROXY}https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-$JQ_ARCH 2>/dev/null \
+-        && chmod +x $TEMP_DIR/jq
+-    } &
+-
+-    # 任务 3: 下载 qrencode
+-    {
+-      wget --continue --tries=2 --timeout=10 -qO $TEMP_DIR/qrencode \
+-        ${GH_PROXY}https://github.com/fscarmen/client_template/raw/main/qrencode-go/qrencode-go-linux-$QRENCODE_ARCH 2>/dev/null \
+-        && chmod +x $TEMP_DIR/qrencode
++      if [[ -z ${KYONG_KERNEL_DIR:-} ]]; then
++        printf '请使用主安装器的 --sing-box 入口重新安装。\n' >&2
++        exit 1
++      fi
++      cp -- "$KYONG_KERNEL_DIR/sing-box" "$KYONG_KERNEL_DIR/libcronet.so" "$TEMP_DIR/"
+     } &
+ 
+@@ -2327,5 +2353,5 @@
+     [ "$IS_TUN" = 'is_tun' ] &&
+     {
+-      timeout 15 bash <(wget -qO- --timeout=5 --tries=1 "https://gitlab.com/fscarmen/warp/-/raw/main/api.sh") --register > $TEMP_DIR/warp_account.json 2>/dev/null
++      kyong_warp_register > $TEMP_DIR/warp_account.json 2>/dev/null
+     } &
+   elif [ "${STATUS[0]}" != "$(text 26)" ]; then
+@@ -2374,5 +2400,5 @@
+   if [[ "${STATUS[1]}" = "$(text 26)" || "$NONINTERACTIVE_INSTALL" = 'noninteractive_install' ]] && [ ! -s ${WORK_DIR}/cloudflared ] && [ "$IS_UNINSTALL" != 'is_uninstall' ]; then
+     {
+-      wget --tries=2 --timeout=10 -qO $TEMP_DIR/cloudflared ${GH_PROXY}https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$ARGO_ARCH >/dev/null 2>&1 && chmod +x $TEMP_DIR/cloudflared >/dev/null 2>&1
++      kyong_cloudflared "$TEMP_DIR/cloudflared"
+     }&
+   elif [ "${STATUS[1]}" != "$(text 26)" ]; then
+@@ -2555,19 +2581,5 @@
+ # 获取 sing-box 最新版本
+ get_sing_box_version() {
+-  local FORCE_VERSION RESULT_VERSION
+-  # FORCE_VERSION 用于在 sing-box 某个主程序出现 bug 时，强制为指定版本，以防止运行出错
+-  FORCE_VERSION=$(wget --tries=2 --timeout=3 -qO- "${GH_PROXY}https://raw.githubusercontent.com/fscarmen/sing-box/refs/heads/main/force_version" 2>&1 | sed 's/^[vV]//g; s/\r//g')
+-  if grep -q '.' <<< "$FORCE_VERSION"; then
+-    RESULT_VERSION="$FORCE_VERSION"
+-  else
+-    # 取最新版本（含 alpha / beta / rc 等预发布版）：releases.atom → 失败则 GitHub API → 仍失败则 DEFAULT_NEWEST_VERSION
+-    RESULT_VERSION=$(wget --tries=2 --timeout=3 -qO- "${GH_PROXY}https://github.com/SagerNet/sing-box/releases.atom" 2>&1 | sed -n '/alternate/ s#.*/tag/v\([^"]\+\)".*#\1#gp' | sort -Vr | sed -n '1p')
+-
+-    if grep -q '^$' <<< "$RESULT_VERSION"; then
+-      RESULT_VERSION=$(wget --tries=2 --timeout=3 -qO- "${GH_PROXY}https://api.github.com/repos/SagerNet/sing-box/releases" 2>&1 | awk -F '["v]' '/"tag_name"/ {print $5}' | sort -Vr | sed -n '1p')
+-      grep -q '^$' <<< "$RESULT_VERSION" && RESULT_VERSION="$DEFAULT_NEWEST_VERSION"
+-    fi
+-  fi
+-  echo "$RESULT_VERSION"
++  printf '%s\n' 1.14.4
+ }
+ 
+@@ -4357,47 +4369,8 @@
+ 
+   if [[ "${#REALITY_PRIVATE}" = 43 && "${#REALITY_PUBLIC}" = 0 ]]; then
+-    if command -v xxd >/dev/null 2>&1; then
+-      until [ -n "$REALITY_PUBLIC" ]; do
+-        # convert base64url -> base64 (standard), add padding
+-        local B64=$(printf '%s' "$REALITY_PRIVATE" | tr '_-' '/+')
+-        local MOD=$(( ${#B64} % 4 ))
+-        if [ $MOD -eq 2 ]; then
+-          B64="${B64}=="
+-        elif [ $MOD -eq 3 ]; then
+-          B64="${B64}="
+-        elif [ $MOD -eq 1 ]; then
+-          generate_reality_keypair convert_error
+-          continue
+-        fi
+-
+-        # decode to raw 32 bytes
+-        echo "$B64" | base64 -d > $TEMP_DIR/_X25519_PRIV_RAW || { generate_reality_keypair convert_error; continue; }
+-
+-        local PRIV_LEN=$(stat -c%s $TEMP_DIR/_X25519_PRIV_RAW 2>/dev/null || stat -f%z $TEMP_DIR/_X25519_PRIV_RAW)
+-        [ "$PRIV_LEN" -ne 32 ] && { generate_reality_keypair convert_error; continue; }
+-
+-        # DER prefix for PKCS#8 private key with OID 1.3.101.110 (X25519)
+-        # Hex: 30 2e 02 01 00 30 05 06 03 2b 65 6e 04 22 04 20
+-        local PREFIX_HEX="302e020100300506032b656e04220420"
+-
+-        # append raw private key hex and create DER
+-        local PRIV_HEX=$(xxd -p -c 256 $TEMP_DIR/_X25519_PRIV_RAW | tr -d '\n')
+-        printf "%s%s" "$PREFIX_HEX" "$PRIV_HEX" | xxd -r -p > $TEMP_DIR/_X25519_PRIV_DER
+-
+-        # convert DER PKCS8 -> PEM private key
+-        openssl pkcs8 -inform DER -in $TEMP_DIR/_X25519_PRIV_DER -nocrypt -out $TEMP_DIR/_X25519_PRIV_PEM 2>/dev/null
+-
+-        # extract public key in DER
+-        openssl pkey -in $TEMP_DIR/_X25519_PRIV_PEM -pubout -outform DER > $TEMP_DIR/_X25519_PUB_DER 2>/dev/null
+-
+-        # last 32 bytes are the raw public key
+-        tail -c 32 $TEMP_DIR/_X25519_PUB_DER > $TEMP_DIR/_X25519_PUB_RAW
+-
+-        # encode to base64url (no padding)
+-        REALITY_PUBLIC=$(base64 -w0 $TEMP_DIR/_X25519_PUB_RAW | tr '+/' '-_' | sed -E 's/=+$//')
+-      done
+-    else
+-      REALITY_PUBLIC=$(wget -qO- --tries=3 --timeout=2 https://realitykey.cloudflare.now.cc/?privateKey=$REALITY_PRIVATE | awk -F '"' '/publicKey/{print $4}')
+-    fi
++    REALITY_PUBLIC=$(kyong_reality_public "$REALITY_PRIVATE") || {
++      printf '无法在本机推导 REALITY 公钥，请检查私钥格式和 OpenSSL。\n' >&2
++      exit 1
++    }
+   elif [[ "${#REALITY_PRIVATE[@]}" = 0 && "${#REALITY_PUBLIC[@]}" = 0 ]]; then
+     generate_reality_keypair new_keypair
+@@ -5248,5 +5221,5 @@
+     CLASH_API_PORT=$(find_free_api_port)
+     local EXP_JSON=$(cat ${WORK_DIR}/conf/04_experimental.json)
+-    printf '%s\n' "$EXP_JSON" | "$DIR/jq" 'del(.experimental.v2ray_api) | .experimental += {
++    printf '%s\n' "$EXP_JSON" | jq 'del(.experimental.v2ray_api) | .experimental += {
+       "clash_api": {
+         "external_controller": "127.0.0.1:'"$CLASH_API_PORT"'"
+@@ -5298,10 +5271,15 @@
+   sing-box_json
+   echo "${L^^}" > ${WORK_DIR}/language
+-  cp $TEMP_DIR/sing-box $TEMP_DIR/jq ${WORK_DIR}
+-  [ -x $TEMP_DIR/qrencode ] && cp $TEMP_DIR/qrencode ${WORK_DIR}
++  install -m 0755 "$TEMP_DIR/sing-box" "$WORK_DIR/sing-box" || exit 1
++  install -m 0644 "$TEMP_DIR/libcronet.so" "$WORK_DIR/libcronet.so" || exit 1
+ 
+   # 生成 Argo systemd 配置文件，并复制 cloudflared 可执行二进制文件
+-  cp $TEMP_DIR/cloudflared ${WORK_DIR}
+-  [ -n "$ARGO_RUNS" ] && argo_systemd
++  if [[ -n $ARGO_RUNS ]]; then
++    if [[ ! -x $TEMP_DIR/cloudflared ]]; then
++      kyong_cloudflared "$TEMP_DIR/cloudflared" || exit 1
++    fi
++    install -m 0755 "$TEMP_DIR/cloudflared" "$WORK_DIR/cloudflared" || exit 1
++    argo_systemd
++  fi
+ 
+   # 如果是 Json Argo，把配置文件复制到工作目录
+@@ -5922,5 +5900,5 @@
+     # 生成 sing-box SFM SFA SFI 订阅文件
+     [ ! -s "$TEMP_DIR/sing-box-template" ] && wget --continue --tries=2 --timeout=10 -qO "$TEMP_DIR/sing-box-template" "${GH_PROXY}${SUBSCRIBE_TEMPLATE}/sing-box" 2>/dev/null
+-    cat $TEMP_DIR/sing-box-template | sed "s#\"<OUTBOUND_REPLACE>\",#$OUTBOUND_REPLACE#; s#\"<NODE_REPLACE>\"#${NODE_REPLACE%,}#g" | ${WORK_DIR}/jq > ${WORK_DIR}/subscribe/sing-box
++    cat $TEMP_DIR/sing-box-template | sed "s#\"<OUTBOUND_REPLACE>\",#$OUTBOUND_REPLACE#; s#\"<NODE_REPLACE>\"#${NODE_REPLACE%,}#g" | jq > ${WORK_DIR}/subscribe/sing-box
+     rm -f $TEMP_DIR/sing-box-template
+   } &>/dev/null
+@@ -5943,8 +5921,8 @@
+ 
+ $(text 82) 1:
+-$(${WORK_DIR}/qrencode "$SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto")
++$(qrencode -t ANSIUTF8 -o - "$SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto")
+ 
+ $(text 82) 2:
+-$(${WORK_DIR}/qrencode "$SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto2")
++$(qrencode -t ANSIUTF8 -o - "$SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto2")
+ EOF
+ 
+@@ -5993,5 +5971,5 @@
+ ----------------------------
+ 
+-$(info "$(echo "{ \"outbounds\":[ ${OUTBOUND_REPLACE%,} ] }" | ${WORK_DIR}/jq)
++$(info "$(echo "{ \"outbounds\":[ ${OUTBOUND_REPLACE%,} ] }" | jq)
+ 
+ ${PROMPT}
+@@ -6043,8 +6021,8 @@
+ 
+ $(hint "$(text 82) 1:")
+-$(${WORK_DIR}/qrencode $SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto)
++$(qrencode -t ANSIUTF8 -o - $SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto)
+ 
+ $(hint "$(text 82) 2:")
+-$(${WORK_DIR}/qrencode $SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto2)
++$(qrencode -t ANSIUTF8 -o - $SUBSCRIBE_ADDRESS/${UUID_CONFIRM}/auto2)
+ "
+ 
+@@ -6054,6 +6032,6 @@
+   if ensure_stats_data; then
+     local IN_SUM OUT_SUM
+-    IN_SUM=$(echo "$STATS_JSON" | $WORK_DIR/jq '.downloadTotal // 0' 2>/dev/null)
+-    OUT_SUM=$(echo "$STATS_JSON" | $WORK_DIR/jq '.uploadTotal // 0' 2>/dev/null)
++    IN_SUM=$(echo "$STATS_JSON" | jq '.downloadTotal // 0' 2>/dev/null)
++    OUT_SUM=$(echo "$STATS_JSON" | jq '.uploadTotal // 0' 2>/dev/null)
+     EXPORT_LIST_FILE="${EXPORT_LIST_FILE}
+ 
+@@ -6082,12 +6060,6 @@
+ # 创建快捷方式
+ create_shortcut() {
+-  cat > ${WORK_DIR}/sb.sh << EOF
+-#!/usr/bin/env bash
+-
+-bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh) \$@
+-EOF
+-  chmod +x ${WORK_DIR}/sb.sh
+-  ln -sf ${WORK_DIR}/sb.sh /usr/bin/sb
+-  [ -s /usr/bin/sb ] && info "\n $(text 71) "
++  install_kyong_shortcut || exit 1
++  info "\n $(text 71) \n"
+ }
+ 
+@@ -6515,6 +6487,5 @@
+   local ARGO_ONLINE ARGO_LOCAL
+   if [ -s ${ARGO_DAEMON_FILE} ]; then
+-    ARGO_ONLINE=$(wget --tries=2 --timeout=10 -qO- "${GH_PROXY}https://api.github.com/repos/cloudflare/cloudflared/releases/latest" | grep "tag_name" | cut -d \" -f4)
+-    grep -q '.' <<< "$ARGO_ONLINE" || error " $(text 100) \n"
++    ARGO_ONLINE=2026.10.7
+     ARGO_LOCAL=$(${WORK_DIR}/cloudflared -v | awk '{for (i=1; i<NF; i++) if ($i=="version") {print $(i+1); exit}}')
+     local APP=Argo LOCAL="$ARGO_LOCAL" ONLINE="$ARGO_ONLINE"
+@@ -6534,5 +6505,5 @@
+   # 升级 Argo (cloudflared)
+   if [ "${UPDATE[0],,}" = 'y' ]; then
+-    wget --continue --tries=2 --timeout=10 -qO $TEMP_DIR/cloudflared ${GH_PROXY}https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$ARGO_ARCH 2>/dev/null
++    kyong_cloudflared "$TEMP_DIR/cloudflared" || return 1
+     if [ -s $TEMP_DIR/cloudflared ]; then
+       cmd_systemctl disable argo
+@@ -6547,69 +6518,6 @@
+   # 升级 Sing-box
+   if [ "${UPDATE[1],,}" = 'y' ]; then
+-    # 先下载到临时文件并校验完整性，避免中断导致损坏的压缩包直接喂给 tar 报错；失败自动重试（第2次起去掉代理直连）
+-    # 直接使用文件路径，仅保留 URL 切换变量、循环计数变量
+-    local SB_UP_URL UP_TRY
+-    for UP_TRY in 1 2 3; do
+-      rm -f "$TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH.tar.gz" "$TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH"
+-      SB_UP_URL="${GH_PROXY}https://github.com/SagerNet/sing-box/releases/download/v$ONLINE/sing-box-$ONLINE-linux-$SING_BOX_ARCH.tar.gz"
+-      [ "$UP_TRY" -ge 2 ] && SB_UP_URL="https://github.com/SagerNet/sing-box/releases/download/v$ONLINE/sing-box-$ONLINE-linux-$SING_BOX_ARCH.tar.gz"
+-      wget --continue --tries=2 --timeout=10 -qO "$TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH.tar.gz" "$SB_UP_URL" 2>/dev/null || { sleep 3; continue; }
+-      [ -s "$TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH.tar.gz" ] || { sleep 3; continue; }
+-      tar xz -C "$TEMP_DIR" -f "$TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH.tar.gz" "sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box" 2>/dev/null || { sleep 3; continue; }
+-      [ -s "$TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box" ] || { sleep 3; continue; }
+-      rm -f "$TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH.tar.gz"
+-      break
+-    done
+-
+-    [ -s "$TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box" ] || error "\n $(text 42) \n"
+-    if ! $TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box check -C ${WORK_DIR}/conf >/dev/null; then
+-      warning "\n $(text 54) " && reading "\n $(text 111) " UPDATE_CONFIG
+-      [ "${UPDATE_CONFIG,,}" = 'n' ] && exit 1
+-
+-      # 设置基础配置参数 dns.servers.prefer_go 和 dns.strategy
+-      local STRATEGY=$(awk -F '"' '/ipv4_only|ipv6_only|prefer_ipv4|prefer_ipv6/ && FILENAME !~ /03_route\.json/{print $(NF-1); exit}' ${WORK_DIR}/conf/0*.json)
+-      STRATEGY=${STRATEGY:-prefer_ipv4}
+-      command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved && local IS_PREFER_GO=false || local IS_PREFER_GO=true
+-
+-      # 备份旧基础配置
+-      for i in $(ls ${WORK_DIR}/conf/0*); do
+-        cp $i ${i}.bak
+-      done
+-      generate_sing_box_base_conf
+-
+-      if ! $TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box check -C ${WORK_DIR}/conf >/dev/null; then
+-        for i in $(ls ${WORK_DIR}/conf/0*.bak); do
+-          mv $i ${i%%.bak}
+-        done
+-        error "\n $(text 101) \n"
+-      fi
+-    fi
+-
+-    cmd_systemctl disable sing-box
+-
+-    # 备份旧版本
+-    cp ${WORK_DIR}/sing-box ${WORK_DIR}/sing-box.bak
+-    hint "\n $(text 102) \n"
+-
+-    # 安装新版本
+-    chmod +x $TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box && mv $TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box ${WORK_DIR}/sing-box
+-    cmd_systemctl enable sing-box
+-    sleep 2
+-
+-    # 检查新版本是否成功运行
+-    if cmd_systemctl status sing-box &>/dev/null; then
+-      # 新版本运行成功，删除备份
+-      rm -f ${WORK_DIR}/sing-box.bak ${WORK_DIR}/conf/*.bak
+-      info "\n $(text 103) \n"
+-    else
+-      # 新版本运行失败，恢复旧版本
+-      warning "\n $(text 104) \n"
+-      mv ${WORK_DIR}/sing-box.bak ${WORK_DIR}/sing-box
+-      rm -f ${WORK_DIR}/conf/*.bak
+-      cmd_systemctl enable sing-box
+-      sleep 2
+-
+-      cmd_systemctl status sing-box &>/dev/null && info "\n $(text 105) \n" || error "\n $(text 106) \n"
+-    fi
++    printf '请通过主安装器的 --sing-box 入口升级内核。\n' >&2
++    return 1
+   fi
+ 
+@@ -6720,6 +6628,6 @@
+   if ensure_stats_data 2>/dev/null; then
+     local IN_SUM OUT_SUM
+-    IN_SUM=$(echo "$STATS_JSON" | $WORK_DIR/jq '.downloadTotal // 0' 2>/dev/null)
+-    OUT_SUM=$(echo "$STATS_JSON" | $WORK_DIR/jq '.uploadTotal // 0' 2>/dev/null)
++    IN_SUM=$(echo "$STATS_JSON" | jq '.downloadTotal // 0' 2>/dev/null)
++    OUT_SUM=$(echo "$STATS_JSON" | jq '.uploadTotal // 0' 2>/dev/null)
+     SB_TRAFFIC="  ⬇$(format_traffic $IN_SUM) ⬆$(format_traffic $OUT_SUM)"
+   fi
+@@ -6752,5 +6660,5 @@
+ # 卸载模式跳过：块内含服务重载 / kill -HUP，对即将删除的服务做无意义操作
+ [ "$IS_UNINSTALL" != 'is_uninstall' ] && \
+-if [ -x "$WORK_DIR/jq" ] && [ -s "$WORK_DIR/conf/04_experimental.json" ] && [ -x "$WORK_DIR/sing-box" ] && [[ "$(date +%Y%m%d)" < "20261231" ]]; then
++if command -v jq >/dev/null 2>&1 && [ -s "$WORK_DIR/conf/04_experimental.json" ] && [ -x "$WORK_DIR/sing-box" ] && [[ "$(date +%Y%m%d)" < "20261231" ]]; then
+   # 旧版本 04_experimental.json 可能缺 clash_api、或含 v2ray_api（旧版脚本注入的）。
+   # clash_api 是官方 release 二进制默认编译功能（with_clash_api），直接补全；
+@@ -6760,8 +6668,8 @@
+     if grep -q 'clash_api' "$WORK_DIR/conf/04_experimental.json"; then
+       # 已有 clash_api（可能由新版脚本生成），仅剥离残留的 v2ray_api
+-      grep -v '^//' "$WORK_DIR/conf/04_experimental.json" | $WORK_DIR/jq 'del(.experimental.v2ray_api)' > "$TEMP_DIR/exp_clash_api_tmp.json" 2>/dev/null
++      grep -v '^//' "$WORK_DIR/conf/04_experimental.json" | jq 'del(.experimental.v2ray_api)' > "$TEMP_DIR/exp_clash_api_tmp.json" 2>/dev/null
+     else
+       # 缺失 clash_api，剥离 v2ray_api 并补全 clash_api
+-      grep -v '^//' "$WORK_DIR/conf/04_experimental.json" | $WORK_DIR/jq --arg ec "127.0.0.1:${API_PORT}" '
++      grep -v '^//' "$WORK_DIR/conf/04_experimental.json" | jq --arg ec "127.0.0.1:${API_PORT}" '
+         del(.experimental.v2ray_api) | .experimental += {
+           "clash_api": { "external_controller": $ec }
